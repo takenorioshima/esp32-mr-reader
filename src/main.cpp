@@ -1,20 +1,32 @@
-#include <BLEMIDI_Transport.h>             // Ref: https://github.com/lathoub/Arduino-BLE-MIDI
-#include <hardware/BLEMIDI_ESP32_NimBLE.h> // Ref: https://github.com/h2zero/NimBLE-Arduino
+#include <BLEMIDI_Transport.h>
+#include <hardware/BLEMIDI_ESP32_NimBLE.h>
 
 #include <JC_Button.h> // Ref: https://github.com/JChristensen/JC_Button
 #include <jled.h>      // Ref: https://github.com/jandelgado/jled
 
+#include <SSD1306Wire.h> // Ref: https://github.com/ThingPulse/esp8266-oled-ssd1306
+
 // Pin Definitions.
 // Safe GPIO pins for switch/button input on ESP32:
-// 2, 4, 5, 13, 14, 15, 16, 17, 18, 19, 21, 23, 24, 25, 26, 27, 32, 33
-const int PIN_BLE_CONNECTION_LED = 2;
+// GPIO1-21, GPIO35-48
+const int PIN_BLE_CONNECTION_LED = 48; // On-board LED pin
 const int MIDI_TX = 17;
 const int MIDI_RX = 16;
 
+// ADC Pins
+// GPIO1-7, GPIO10-13, GPIO15-18
+
+// I2C Pins
+const int PIN_SDA = 8;
+const int PIN_SCL = 9;
+
 // MIDI.
 const int MIDI_CH = 1;
-MIDI_CREATE_INSTANCE(HardwareSerial, Serial2, MIDI)
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial2, MIDI);
 BLEMIDI_CREATE_INSTANCE("MR. READER", MIDI_BLE);
+
+// OLED
+SSD1306Wire display(0x3c, PIN_SDA, PIN_SCL);
 
 void handleBLEMIDIConnected()
 {
@@ -56,8 +68,10 @@ void posToNote()
 void playNote()
 {
   MIDI.sendNoteOff(currentNotes[currentIndex], 127, MIDI_CH);
+  MIDI_BLE.sendNoteOff(currentNotes[currentIndex], 127, MIDI_CH);
   currentIndex = (currentIndex + 1) % currentNotesSize;
   MIDI.sendNoteOn(currentNotes[currentIndex], 127, MIDI_CH);
+  MIDI_BLE.sendNoteOn(currentNotes[currentIndex], 127, MIDI_CH);
   Serial.println("MIDI Note[" + String(currentIndex) + "]: " + String(currentNotes[currentIndex]));
 }
 
@@ -65,19 +79,24 @@ void setup()
 {
   Serial.begin(115200);
 
-  // MIDI
   Serial2.begin(31250, SERIAL_8N1, MIDI_RX, MIDI_TX);
   MIDI.begin();
 
   MIDI_BLE.begin();
-  BLEMIDI_BLE.setHandleConnected(handleBLEMIDIConnected); // Ref: https://github.com/lathoub/Arduino-BLE-MIDI/issues/76
+  BLEMIDI_BLE.setHandleConnected(handleBLEMIDIConnected);  // Ref: https://github.com/lathoub/Arduino-BLE-MIDI/issues/76
   BLEMIDI_BLE.setHandleDisconnected(handleBLEMIDIDisconnected);
+
+  display.init();
+  display.flipScreenVertically();
+  display.setContrast(255);
 }
 
 void loop()
 {
-  // put your main code here, to run repeatedly:
   posToNote();
   playNote();
   delay(500);
+  display.clear();
+  display.println("SSD1306 OLED");
+  display.display();
 }
