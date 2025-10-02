@@ -27,6 +27,8 @@ BLEMIDI_CREATE_INSTANCE("MR. READER", MIDI_BLE);
 
 // OLED
 SSD1306Wire display(0x3c, PIN_SDA, PIN_SCL);
+unsigned long oledLastUpdatedAt = 0;
+const unsigned long oledUpdateInterval = 1000 / 30; // = 30Hz.
 
 void handleBLEMIDIConnected()
 {
@@ -39,12 +41,19 @@ void handleBLEMIDIDisconnected()
 }
 
 const int MAX_NOTES = 16;
-int currentIndex = 0;
-int currentNotes[MAX_NOTES];
-int currentNotesSize = 0;
+
+struct NoteSequence {
+  int notes[MAX_NOTES];
+  int size = 0;
+  int index = 0;
+};
+
+NoteSequence seqA;
+NoteSequence seqB;
 
 // Sample POS CODE
-String posCode = "4969757161616";
+String posCodeA = "4969757161615";
+String posCodeB = "4512345678909";
 int baseNote = 60; // C4
 
 int quantizeNote(int digit)
@@ -54,25 +63,83 @@ int quantizeNote(int digit)
   return note;
 }
 
-void posToNote()
+void posToNotes(const String &posCode, NoteSequence &seq)
 {
-  String formattedPosCode = posCode.substring(2);                           // Remove country code
+  String formattedPosCode = posCode.substring(2); // Remove country code
+  
   char checkDigit = formattedPosCode.charAt(formattedPosCode.length() - 1); // Get check digit(Last digit)
-  currentNotesSize = checkDigit - '0';
-  for (int i = 0; i < currentNotesSize; i++)
+  seq.size = checkDigit - '0';
+  for (int i = 0; i < seq.size; i++)
   {
-    currentNotes[i] = quantizeNote(formattedPosCode.charAt(i) - '0'); // Convert char to int and quantize to MIDI note number
+    int digit = formattedPosCode.charAt(i) - '0';
+    seq.notes[i] = quantizeNote(digit);
   }
+  seq.index = 0;
 }
 
-void playNote()
+void stepSequence(NoteSequence &seq) {
+  if (seq.size == 0) return;
+
+  MIDI.sendNoteOff(seq.notes[seq.index], 127, MIDI_CH);
+  MIDI_BLE.sendNoteOff(seq.notes[seq.index], 127, MIDI_CH);
+
+  seq.index = (seq.index + 1) % seq.size;
+
+  MIDI.sendNoteOn(seq.notes[seq.index], 127, MIDI_CH);
+  MIDI_BLE.sendNoteOn(seq.notes[seq.index], 127, MIDI_CH);
+
+  Serial.println("Note[" + String(seq.index) + "] : " + String(seq.notes[seq.index]));
+}
+
+void drawSequence(const String &posCode, const NoteSequence &seq, int yOffset) {
+  int boxWidth = 9;
+  int boxHeight = 12;
+  int highlightWidth = boxWidth - 4;
+  int highlightHeight = boxHeight - 4;
+  int spacing = 11;
+  
+  display.setFont(ArialMT_Plain_10);
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+
+  display.drawString(64, yOffset, posCode);
+
+  for (int i = 0; i < 10; i++) {
+    int x = i * spacing;
+    int y = yOffset + 15;
+
+    if (i < seq.size) {
+      display.fillRect(x, y, boxWidth, boxHeight);
+    } else {
+      display.drawRect(x, y, boxWidth, boxHeight);
+    }
+
+    if (i == seq.index) {
+      display.setColor(BLACK);
+      int hx = x + (boxWidth - highlightWidth) / 2;
+      int hy = y + (boxHeight - highlightHeight) / 2;
+      display.fillRect(hx, hy, highlightWidth, highlightHeight);
+      display.setColor(WHITE);
+    }
+  }
+
+  display.setFont(ArialMT_Plain_10);
+  display.setTextAlignment(TEXT_ALIGN_RIGHT);
+  display.drawString(128, yOffset + 15, String(seq.notes[seq.index]));
+}
+
+void updateDisplay()
 {
-  MIDI.sendNoteOff(currentNotes[currentIndex], 127, MIDI_CH);
-  MIDI_BLE.sendNoteOff(currentNotes[currentIndex], 127, MIDI_CH);
-  currentIndex = (currentIndex + 1) % currentNotesSize;
-  MIDI.sendNoteOn(currentNotes[currentIndex], 127, MIDI_CH);
-  MIDI_BLE.sendNoteOn(currentNotes[currentIndex], 127, MIDI_CH);
-  Serial.println("MIDI Note[" + String(currentIndex) + "]: " + String(currentNotes[currentIndex]));
+  unsigned long now = millis();
+  if( now - oledLastUpdatedAt < oledUpdateInterval){
+    return;
+  }
+  display.clear();
+  
+  drawSequence(posCodeA, seqA, 0);
+  drawSequence(posCodeB, seqB, 32); 
+
+  display.display();
+  oledLastUpdatedAt = now;
 }
 
 void setup()
@@ -86,6 +153,10 @@ void setup()
   BLEMIDI_BLE.setHandleConnected(handleBLEMIDIConnected);  // Ref: https://github.com/lathoub/Arduino-BLE-MIDI/issues/76
   BLEMIDI_BLE.setHandleDisconnected(handleBLEMIDIDisconnected);
 
+  // Test: Setup sequences
+  posToNotes(posCodeA, seqA);
+  posToNotes(posCodeB, seqB);
+
   display.init();
   display.flipScreenVertically();
   display.setContrast(255);
@@ -93,10 +164,8 @@ void setup()
 
 void loop()
 {
-  posToNote();
-  playNote();
+  stepSequence(seqA);
+  stepSequence(seqB);
+  updateDisplay();
   delay(500);
-  display.clear();
-  display.println("SSD1306 OLED");
-  display.display();
 }
