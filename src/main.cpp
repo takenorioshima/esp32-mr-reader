@@ -5,11 +5,14 @@
 #include <jled.h>      // Ref: https://github.com/jandelgado/jled
 
 #include <SSD1306Wire.h> // Ref: https://github.com/ThingPulse/esp8266-oled-ssd1306
+#include <Wire.h>
+#include <Adafruit_MCP4725.h>
 
 // Pin Definitions.
 // Safe GPIO pins for switch/button input on ESP32:
 // GPIO1-21, GPIO35-48
 const int PIN_BLE_CONNECTION_LED = 48; // On-board LED pin
+const int PIN_GATE_IN = 21;
 const int MIDI_TX = 17;
 const int MIDI_RX = 16;
 
@@ -17,13 +20,23 @@ const int MIDI_RX = 16;
 // GPIO1-7, GPIO10-13, GPIO15-18
 
 // I2C Pins
-const int PIN_SDA = 8;
-const int PIN_SCL = 9;
+const int PIN_SDA = 4;
+const int PIN_SCL = 5;
 
 // MIDI.
 const int MIDI_CH = 1;
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial2, MIDI);
 BLEMIDI_CREATE_INSTANCE("MR. READER", MIDI_BLE);
+
+// DAC
+Adafruit_MCP4725 dac;
+const float VDD = 3.3; // VDD
+const int DAC_MAX = 4095; // 12-bit DAC
+
+const int REF_NOTE = 60; // C4 (MIDI note 60)
+const float REF_VOLTAGE = 0.0; // 0V for C4
+
+Button gateInButton(PIN_GATE_IN);
 
 // OLED
 SSD1306Wire display(0x3c, PIN_SDA, PIN_SCL);
@@ -40,6 +53,8 @@ void handleBLEMIDIDisconnected()
   digitalWrite(PIN_BLE_CONNECTION_LED, LOW);
 }
 
+// Sequencer
+bool isNoteOn = false;
 const int MAX_NOTES = 16;
 
 struct NoteSequence {
@@ -63,6 +78,18 @@ int quantizeNote(int digit)
   return note;
 }
 
+float midiToVolts(int midiNote)
+{
+  float octavesFromRef = (midiNote - REF_NOTE) / 12.0;
+  return REF_VOLTAGE + octavesFromRef * 1.0;  // 1V/oct
+}
+
+uint16_t voltsToDac(float volts) {
+  if (volts < 0.0) volts = 0.0;
+  if (volts > VDD) volts = VDD;
+  return round((volts / VDD) * DAC_MAX);
+}
+
 void posToNotes(const String &posCode, NoteSequence &seq)
 {
   String formattedPosCode = posCode.substring(2); // Remove country code
@@ -80,23 +107,40 @@ void posToNotes(const String &posCode, NoteSequence &seq)
 void stepSequence(NoteSequence &seq) {
   if (seq.size == 0) return;
 
-  MIDI.sendNoteOff(seq.notes[seq.index], 127, MIDI_CH);
-  MIDI_BLE.sendNoteOff(seq.notes[seq.index], 127, MIDI_CH);
+  gateInButton.read();
+  if (gateInButton.isPressed()) {
+    if (!isNoteOn) {
+      isNoteOn = true;
+      MIDI.sendNoteOn(seq.notes[seq.index], 127, MIDI_CH);
+      MIDI_BLE.sendNoteOn(seq.notes[seq.index], 127, MIDI_CH);
+      Serial.println("Gate In - Note On: " + String(seq.notes[seq.index]));
+      // Control voltage output
+      float volts = midiToVolts(seq.notes[seq.index]);
+      uint16_t value = voltsToDac(volts);
+      dac.setVoltage(value, false);
+      Serial.printf("note=%d volts=%.3fV dac=%d\n", seq.notes[seq.index], volts, value);
+    }
+    return; // Hold the note while gate is high
+  } else {
+    if (isNoteOn) {
+      isNoteOn = false;
+      MIDI.sendNoteOff(seq.notes[seq.index], 127, MIDI_CH);
+      MIDI_BLE.sendNoteOff(seq.notes[seq.index], 127, MIDI_CH);
+      dac.setVoltage(0, false);
+      Serial.println("Gate Out - Note Off: " + String(seq.notes[seq.index]));
 
-  seq.index = (seq.index + 1) % seq.size;
-
-  MIDI.sendNoteOn(seq.notes[seq.index], 127, MIDI_CH);
-  MIDI_BLE.sendNoteOn(seq.notes[seq.index], 127, MIDI_CH);
-
-  Serial.println("Note[" + String(seq.index) + "] : " + String(seq.notes[seq.index]));
+      // Move to the next note
+      seq.index = (seq.index + 1) % seq.size;
+    }
+  }
 }
 
 void drawSequence(const String &posCode, const NoteSequence &seq, int yOffset) {
-  int boxWidth = 9;
+  int boxWidth = 8;
   int boxHeight = 12;
   int highlightWidth = boxWidth - 4;
   int highlightHeight = boxHeight - 4;
-  int spacing = 11;
+  int spacing = 9;
   
   display.setFont(ArialMT_Plain_10);
   display.setTextAlignment(TEXT_ALIGN_CENTER);
@@ -157,6 +201,11 @@ void setup()
   posToNotes(posCodeA, seqA);
   posToNotes(posCodeB, seqB);
 
+  // DAC
+  Wire.begin(PIN_SDA, PIN_SCL);
+  dac.begin(0x60);
+  gateInButton.begin();
+
   display.init();
   display.flipScreenVertically();
   display.setContrast(255);
@@ -165,7 +214,6 @@ void setup()
 void loop()
 {
   stepSequence(seqA);
-  stepSequence(seqB);
+  // stepSequence(seqB); // Comment out to play only seqA
   updateDisplay();
-  delay(500);
 }
